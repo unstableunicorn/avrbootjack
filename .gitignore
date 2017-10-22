@@ -50,3 +50,16 @@ modules.order
 Module.symvers
 Mkfile.old
 dkms.conf
+
+# atmel project files
+*.cproj
+*.atsln
+
+# compiled commands
+compile_commands.json
+
+# swap files
+**.swp
+
+# miscellaneous
+logs/

@@ -17,6 +17,7 @@ SRC_DIR := src/
 ROOT_DIR := $(shell pwd)
 RM := rm -rf
 F_CPU = 7372800UL
+#MMCU = atmega168
 MMCU = atmega1284p
 
 # programmer settings
@@ -54,7 +55,7 @@ W_FLAGS := -Wall -Wextra -Wno-expansion-to-defined
 M_FLAGS := -gdwarf-2
 
 # Combined plus extra Compiler Flags
-CFLAGS := -x c $(G_FLAGS) $(DEFINES) $(OPT_FLAGS) $(W_FLAGS) $(CPU_FLAG) -std=gnu99 $(M_FLAGS) $(IDIR)
+CFLAGS := -x c $(G_FLAGS) $(DEFINES) $(OPT_FLAGS) $(W_FLAGS) $(CPU_FLAG) -std=gnu99 --save-temps $(M_FLAGS) $(IDIR)
 OBJ_DIR := obj/
 OUTPUT_DIR := output/
 VERSION := $(shell cat $(SRC_DIR)/version)

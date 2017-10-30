@@ -10,7 +10,8 @@
 #define	PROG_NO	PD4
 		
 /* baud rate register value calculation */		
-#define	CPU_FREQ	7372800
+//#define	CPU_FREQ	7372800
+#define F_CPU 7372800UL
 #define	BAUD_RATE	115200
 #define	BRREG_VALUE	3
 		
@@ -28,7 +29,7 @@
 #define	SPMCR_REG	SPMCSR
 #define	APP_END_STR     "0x1F800\0"	
 #define BOOT_END_STR    "0x1FFFE\0"
-//#define	LARGE_MEMORY	
+#define	LARGE_MEMORY	
 		
 /* definitions for device recognition */		
 #define	PARTCODE	0

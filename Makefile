@@ -12,7 +12,7 @@ AVR_OBJCOPY := $(TC_PATH)/bin/avr-objcopy
 AVR_OBJDUMP := $(TC_PATH)/bin/avr-objdump
 AVR_SIZE := $(TC_PATH)/bin/avr-size
 PROJECT_FILE = bootloader
-RELEASE_NAME = dss_carrier_firmware-bootloader
+RELEASE_NAME = firmware-bootloader
 SRC_DIR := src/
 ROOT_DIR := $(shell pwd)
 RM := rm -rf
@@ -30,7 +30,7 @@ LOCKMASK := 0xc0
 DEVICE := m1284p
 PROGRAMMER := avrispmkII
 PORT := usb
-NAME := Fleet and Gen1 Bootloader
+NAME := 
 
 
 # Include directory

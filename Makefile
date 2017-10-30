@@ -1,5 +1,5 @@
 ################################################################################
-# Makefile for dss camera bootloader
+# Makefile for bootjacker code
 # Author: Elric Hindy
 # Date: 25 Aug 2016
 # Version 1.0

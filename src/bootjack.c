@@ -1,3 +1,11 @@
+/********************************************************************************
+ *
+ * Author       : Elric Hindy
+ *
+ * Description  : This program updates the bootloader of an unprotected avr
+ *                bootloader by hijacking the spm instruction in the bootloader
+ *                section.
+ ********************************************************************************/
 #include "defines.h"
 #include "serial.h"
 #include "flash.h"
@@ -5,50 +13,42 @@
 #include <avr/wdt.h>
 #include <avr/interrupt.h>
 #include <util/delay.h>
-
-#define SPIFbit 7
-#define SPR (1<<0)
-#define SpmCsr 0x37
-#define SpmCsrMem (SpmCsr+0x20)
-
-#define IOAddrInsMask(aPort) (((aPort&0x30)<<5)|(aPort&7))
-
-#define	PAGESIZE	256
-#define	APP_END     0x1F800	
-#define BOOT_END    0x1FFFE
-#define BOOT_START 0x1F8Ff 
-#define StsIns 0x9200
-#define StsRegMask 0x01f0
-#define OutSpmCsrIns (0xb800+IOAddrInsMask(SpmCsr))
-#define OutSpmCsrRegMask 0x01f0
-#define SpmIns 0x95e8
-#define TestTimerWait 0x2E
+//include the new bootloder array and definitions
+#include "new_boot.h"
 
 
-typedef enum {
-	SpmTypeStsIdeal=0,
-	SpmTypeStsSecondary,
-	SpmTypeOutIdeal,
-	SpmTypeOutSecondary,
-	SpmTypeNone=7
-} SpmType;
+//define boot code to represent this program
+#define BOOT_CODE_STRING "AVRBC10\0"
+// define the SPM Control and Status Register
+#define SPM_CONTROL_STATUS_REGISTER 0x37
+// define the memory location of this register (0x20 + the default)
+#define SPM_CONTROL_STATUS_REGISTER_MEMORY (SPM_CONTROL_STATUS_REGISTER+0x20)
 
-#define FlashPageSize (1<<FlashPageSizeBits)
-#define FlashPageSizeInWords (1<<(FlashPageSizeBits-1))
-#define FlashSpmEnMask (1<<0)
-#define FlashSpmEraseMask (1<<1)
-#define FlashSpmWritePageMask (1<<2)
-#define FlashSpmBlbSetMask (1<<3)
-#define FlashSpmRwwsReMask (1<<4)
-#define FlashSpmRwwsBusyMask (1<<6)
+#define STS_INSTRUCTION 0x9200
+#define STS_REGISTER_MASK 0x01f0
+#define SPM_INSTRUCTION 0x95e8
+/*
+ * This timer sets the cycle count from the enable timer asm instruction to the spm call
+ * This value may require adjustment depending on device and requires cycle 
+ * counting the operations
+*/
+#define TEST_TIMER_WAIT 0x2E
 
-#define FlashSpmEn FlashSpmEnMask
-#define FlashSpmErase (FlashSpmEraseMask|FlashSpmEnMask)
-#define FlashSpmWritePage (FlashSpmWritePageMask|FlashSpmEnMask)
-#define FlashSpmBlbSet (FlashSpmBlbSetMask|FlashSpmEnMask)
-#define FlashSpmRwws (FlashSpmRwwsReMask|FlashSpmEnMask)
-#define FlashSpmRwwsBusy (FlashSpmRwwsBusyMask)
+// define the bit masks and SPM instruction masks
+#define FLASH_SPM_EN_MASK (1<<0)
+#define FLASH_SPM_ERASE_MASK (1<<1)
+#define FLASH_SPM_WRITE_PAGE_MASK (1<<2)
+#define FLASH_SPM_EN FLASH_SPM_EN_MASK
+#define FLASH_SPM_ERASE (FLASH_SPM_ERASE_MASK|FLASH_SPM_EN_MASK)
+#define FLASH_SPM_WRITE_PAGE (FLASH_SPM_WRITE_PAGE_MASK|FLASH_SPM_EN_MASK)
 
+
+/*
+ * A large address broken to allow easy access to the
+ * Z High,
+ * Z Low and
+ * Ramp Z bytes
+ */
 typedef union
 {
     struct 
@@ -56,36 +56,47 @@ typedef union
         uint8_t zl;
         uint8_t zh;
         uint8_t rz;
-		uint8_t res;
-        
+		uint8_t res; // reserved as not used
     };
     uint32_t add_32;
-} ADD_T;
+} Address32;
 
-ADD_T SpmSequenceAddr;
 
-void soft_reset()
+/*
+ *A watchdog reset routine to reset the firmware
+ * */
+void softReset()
 {
+    sendString("AVRERR0");
     wdt_enable(WDTO_15MS);
     for(;;){}
 }
 
-void CheckBootLock(void)
+
+/*
+ * Checks if the bootloader is protected
+ * This program can not work on a protected bootloader
+ */
+uint8_t checkBootLock(void)
 {
-	if((_GET_LOCK_BITS()&0x3f)!=0x3f)
+	if((_GET_LOCK_BITS()&0x3F)!=0x3F)
     {
-        sendstring("AVRBCE9");
-        soft_reset();
+        return 0;
 	}
+    else
+    {
+        return 1;
+    }
 }
 
-uint16_t GetPgmWord(uint32_t address)
+
+/*
+ * get a word from a flash address
+ */
+uint16_t getFlashWord(uint32_t address)
 {
     uint16_t data = 0;
-	#ifndef LARGE_MEMORY
-		address >>=1;
-	#endif
-    data = _LOAD_PROGRAM_MEMORY( (address) + 1);
+    data = _LOAD_PROGRAM_MEMORY(address + 1);
     data = (data << 8) & 0xFF00;
 	data |= _LOAD_PROGRAM_MEMORY(address)&0x00FF;
 
@@ -93,34 +104,45 @@ uint16_t GetPgmWord(uint32_t address)
 }
 
 
-uint8_t FindSpm(void)
+//initialise global SPM sequence address, this is set by the find spm instruction
+Address32 spm_sequence_address;
+
+/*
+ * This function searches through the bootloader
+ * section for a valid 'out' and 'spm' instruction 
+ * and stores the location in the global spm address variable
+ * This instruction is used to execute a page
+ * load, write and erase instructions.
+ * Every bootloader will have this in the code somewhere.
+ */
+uint8_t findSpmInstruction(void)
 {
-	uint8_t spmType=SpmTypeNone;
-	uint16_t StsIn_check, SpmCsrMem_check, SpmIns_check;
-	uint8_t count = 0;
+	uint16_t sts_instruction_check, spm_csr_mem_check, spm_instruction_check;
 	
-	// looking for ?0 92 57 00 e8 95
-	for(uint32_t i = APP_END; i < BOOT_END; i += 2) {
-		StsIn_check = GetPgmWord((i));
-		StsIn_check &= ~StsRegMask;
-		SpmCsrMem_check = GetPgmWord(i+2);
-		SpmIns_check = GetPgmWord(i+4);
-		if( StsIn_check == StsIns && SpmCsrMem_check == SpmCsrMem && SpmIns_check == SpmIns)
+	for(uint32_t i = APP_END; i < BOOT_END; i += 2)
+    {
+		sts_instruction_check = getFlashWord((i));
+		sts_instruction_check &= ~STS_REGISTER_MASK;
+		spm_csr_mem_check = getFlashWord(i+2);
+		spm_instruction_check = getFlashWord(i+4);
+
+		if( sts_instruction_check == STS_INSTRUCTION &&
+            spm_csr_mem_check == SPM_CONTROL_STATUS_REGISTER_MEMORY &&
+            spm_instruction_check == SPM_INSTRUCTION)
         {
-			if(count == 1)
-			{
-				spmType=SpmTypeStsIdeal;
-				SpmSequenceAddr.add_32=i;
-				break;
-			}
-			count++;
-			
+            spm_sequence_address.add_32=i;
+            return 1;
 		}
 	}
-	return spmType;
+    //did not find spm!!
+    sendString("AVRNSPM");
+	return 0;
 }
 
-void SetupTimer0B(uint8_t cycles)
+/*
+ * Sets up the timer to interrupt the spm instruction
+ */
+void setupTimer0B(uint8_t cycles)
 {
 	// clear PCINT2.
 	PCICR&=~(1<<PCIE2);	// disable PCINT2 interrupts.
@@ -130,17 +152,34 @@ void SetupTimer0B(uint8_t cycles)
 	TCCR0A=0;	// mode 0, no OCR outputs.
 	TCNT0=0;	// reset the timer
 	TIFR0=(1<<OCF0B)|(1<<OCF0A)|(1<<TOV0);	// clear all pending timer0 interrupts.
-	OCR0B=cycles;	// 40 clocks from now (40 in test, 31 for real).
+	OCR0B=cycles;	// cycles until interrupt is called
 	TIMSK0=(1<<OCIE0B);	// OCR0B interrupt enabled.
 }
 
 
-void  SpmLeapCmd( uint32_t addr, uint8_t spmCmd, uint16_t optValue)
+/*
+ * The heart of the program!
+ * This function leaps to the spm instructions found in the bootloader.
+ * The AVR's can only write to flash while in the bootloader section
+ * so this function loads the registers use by the found instruction and 
+ * puts the program counter pointer at the spm instructions found in
+ * the bootloader to load the data and commands in for the spm to execute.
+ * It then places the current program counter pointer on the stack
+ * for the interrupt to pop and return to this function.
+ * We must interrupt the spm instruction call within 4 clock cycles
+ * of the call so that we can pop the previous program counter in to
+ * the call stack and return to this function. Otherwise the program
+ * counter will continue through the bootloader executing any instructions
+ * after the found spm instruction.
+ */
+void spmLeap( uint32_t address, uint8_t spm_cmd, uint16_t data)
 {
-	uint8_t cmdReg,tmp=0;
-    const ADD_T spmaddr = SpmSequenceAddr; //only constants seems to work so create one here.
+	uint8_t cmd_register, tmp=0;
+    //only constants seem to work in the asm address calls
+    const Address32 spmaddr = spm_sequence_address;
 
-    cmdReg=(uint8_t)((GetPgmWord(SpmSequenceAddr.add_32)>>4)&0x1f);
+    //get the register address used by the current found spm command
+    cmd_register=(uint8_t)((getFlashWord(spm_sequence_address.add_32)>>4)&0x1f);
 
 	sei();
     asm volatile(
@@ -153,15 +192,12 @@ void  SpmLeapCmd( uint32_t addr, uint8_t spmCmd, uint16_t optValue)
                 "sbrc %11,0\n"	//wait for spm operation complete.
                 "rjmp SpmLeapCmdWaitSpm\n"
                 "ldi %11,1\n"	// timer 0 start at fClk
-				//"break\n" // break here for testing.
-                "out %2,%11\n"	// set TCCR0B so off we go. This is time 0c.
+                "out %2,%11\n"	// set TCCR0B so off we go.
                 "movw r0,%5\n"	// set the value to be written.
-
                 "mov r30,%3\n"	// get the register used by the sequence's spm command.
                 "ldi r31,0\n"	// z^reg to save.
                 "ld %11,Z\n"	// get the reg
                 "push %11\n"	// saved it, now we can overwrite with spm command.
-
                 "ldi r30,lo8(pm(SpmLeapCmdRet))\n"
                 "ldi r31,hi8(pm(SpmLeapCmdRet))\n"
                 "push r30\n"
@@ -190,14 +226,226 @@ void  SpmLeapCmd( uint32_t addr, uint8_t spmCmd, uint16_t optValue)
                 "pop r31\n"
                 "pop r30\n"
                 "pop %11\n"
-                "pop r1\n" // %0          %1            %2                         %3
-                "pop r0\n" : "=d" (tmp), "=r" (addr) : "I" (_SFR_IO_ADDR(TCCR0B)), "r" (cmdReg),
-                //%4           %5              %6
-                "r" (spmCmd), "r" (optValue), "0" (addr),
+                "pop r1\n" // %0          %1              %2                          %3
+                "pop r0\n" : "=d" (tmp), "=r" (address) : "I" (_SFR_IO_ADDR(TCCR0B)), "r" (cmd_register),
+                //%4           %5           %6
+                "r" (spm_cmd), "r" (data), "0" (address),
                 //%7              %8               %9
                 "m" (spmaddr.zl), "m" (spmaddr.zh),"m" (spmaddr.rz),
-                // %10          %11
-                "I" (SpmCsr), "d" (tmp) );
+                // %10                             %11
+                "I" (SPM_CONTROL_STATUS_REGISTER), "d" (tmp) );
+}
+
+/*
+ * write a block of data to program memory
+ */
+uint8_t writeBlock(uint8_t *src, uint16_t address, uint16_t size)
+{	
+	uint16_t data = 0xFF; //initialise to 0xFF, should be overwritten
+
+    /* 
+     * store the data to be written to the page
+     * Note: if less than a page is specified the
+     * rest of the data will be 0xFF due to the erase
+     * and more than a page will be ignored
+     */
+	for(uint16_t i=1; i <= size || i <= PAGESIZE; i+=2)
+	{
+		data = *((uint16_t *)src);
+		spmLeap(address+i, FLASH_SPM_EN, data);	
+		src+=2;
+	}
+
+    //erase the page that is about to be written
+	spmLeap(address,FLASH_SPM_ERASE,data);
+
+    //must refind spm instruction here in case the one currently in use was just erased
+    if(!findSpmInstruction())    
+    {
+        return 0; //fail
+    }
+
+    //Write the new page to the flash memory
+	spmLeap(address,FLASH_SPM_WRITE_PAGE,data);
+
+    return 1; //Success
+}
+
+
+/*
+ * Writes the new bootloader to the bootlader section
+ * Note: This process will fail if the new bootloader only 
+ * has spm instructions in the last page.
+ * As long as there is one spm instruction in memory at all times
+ * even after a page erase then this will work.
+ */
+uint8_t bootJack(void)
+{
+	/* Write spm command to end of boot section where it won't
+     * get overwritten until the last call so it can be used
+     * in the rest of the spm calls if others were deleted
+     * will still fail if no spm calls in every other page as this is the last to get written
+     */
+	sendString("AVRWSPM");
+	uint8_t leapcmd[6] = {0x70,0x92,0x57,0x00,0xe8,0x95};
+
+	if(!writeBlock(leapcmd, (uint16_t)(BOOT_END-6), 6))
+    {
+        return 0; //failed
+    }
+	
+    //write bootlaoder
+	sendString("AVRWDAT");
+    uint8_t page_count = 0;
+    for(uint32_t address = BOOT_START, page_start=0;
+        address <= BOOT_END+PAGESIZE;
+        address += PAGESIZE, page_start+=PAGESIZE)
+    {
+        sendString("AVRPGWR");
+
+        if(!writeBlock(newbootloader+page_start, address, PAGESIZE-1))
+        {
+            return 0; //failed
+        }
+
+        //break after all pages written if less than bootloader section
+        page_count ++;
+        if(page_count == NUMBER_OF_PAGES)
+        {
+            break;
+        }
+    }
+
+    return 1; //success
+}
+
+void blockRead(unsigned int size, unsigned char memory_type, unsigned long *address)
+{
+    // Flash memory type.
+    if(memory_type=='F')
+    {
+        (*address) <<= 1; // Convert address to bytes temporarily.
+
+        do
+        {
+            sendChar( _LOAD_PROGRAM_MEMORY(*address) );
+            sendChar( _LOAD_PROGRAM_MEMORY((*address)+1) );
+            (*address) += 2; // Select next word in memory.
+            size -= 2; // Subtract two bytes from number of bytes to read
+        } while (size); // Repeat until all block has been read
+
+        (*address) >>= 1; // Convert address back to Flash words again.
+    }
+    else
+    {
+        //send unknown memory_type type
+        sendChar('?');
+    }
+}
+
+unsigned char blockLoad(unsigned int size, unsigned char memory_type, unsigned long *address)
+{
+    unsigned char buffer[PAGESIZE];
+    uint16_t count = 0;
+
+    // Flash memory type.
+    if(memory_type=='F')
+    { 
+        //load page in to buffer
+        do
+        {
+            buffer[count] = getChar();
+            size--; // Reduce number of bytes to write by one.
+            count++;
+        } while(size); // Loop until all bytes written.
+
+        if(!writeBlock(buffer, (uint16_t) address, PAGESIZE-1))
+        {
+            return '0';
+        }
+
+        return '\r'; // Report programming OK
+    }
+    else
+    {
+        // Invalid memory type?
+        return '?';
+    }
+}
+
+void main()
+{
+    cli(); //disable all interrupts
+	wdt_disable();
+    initUart();
+
+    //check if boot section is locked
+    if(!checkBootLock())
+    {
+        sendString("AVRERR1");
+        _delay_ms(1000);        
+        softReset();
+    }
+
+    // find spm instruction
+	if(findSpmInstruction())
+    {
+        sendString("AVRFSPM");
+		setupTimer0B(TEST_TIMER_WAIT);	// sts timing.
+    }
+	else
+    {
+        sendString("AVRERR2");
+        _delay_ms(1000);        
+		softReset();
+    }
+
+    //found spm good to continue and update bootloader
+	if(!bootJack())
+    {
+        //failed to write bootjack!
+        sendString("AVRERR3");
+    }
+    else
+    {
+        //Send confirmation string that we have completed
+        sendString(BOOT_CODE_STRING); //Send ID String
+    }
+
+    cli(); //make sure all interrupts are disabled
+
+    //the below code for writing/reading a bootloader is untested and currently not required.
+    unsigned long address;
+    unsigned int temp_int=0;
+	for(;;)
+	{
+        unsigned char val=getChar(); // Wait for command character
+        // Return programmer identifier.
+        if(val=='S')
+        {
+            sendString(BOOT_CODE_STRING); //Send ID String
+        }
+        // Set address.
+        else if(val=='A') // Set address...
+        { // NOTE: Flash addresses are given in words, not bytes.
+            address=(getChar()<<8) | getChar(); // Read address high and low byte.
+            sendChar('\r'); // Send OK back.
+        }
+        //Block read
+        else if(val=='g')
+        {
+            temp_int = (getChar()<<8) | getChar(); // Get block size.
+            val = getChar(); // Get memtype
+            blockRead(temp_int,val,&address); // Block read
+        }
+        //block load.
+        else if(val=='B')
+        {
+          temp_int = (getChar()<<8) | getChar(); // Get block size.
+          val = getChar(); // Get memtype.
+          sendChar( blockLoad(temp_int,val,&address) ); // Block load.
+        }
+	}
 }
 
 
@@ -219,70 +467,4 @@ ISR(TIMER0_COMPB_vect, ISR_NAKED) // OCR0B
         "pop r31\n"	// don't care about overwriting Z because SpmLeap doesn't need it.
         "pop r30\n"
         "reti\n" : : "I" (_SFR_IO_ADDR(TCCR0B)), "I" (_SFR_IO_ADDR(TCNT0)), "I" (_SFR_IO_ADDR(TIFR0)));
-}
-
-
-void WriteBlock(uint8_t *src, uint16_t dst, uint16_t size)
-{	
-	uint16_t data = 0xFF;
-	for(uint16_t i=1; i <= size; i+=2)
-	{
-		data = *((uint16_t *)src);
-		SpmLeapCmd(dst+i,FlashSpmEn,data);	
-		src+=2;
-	}
-	SpmLeapCmd(dst,FlashSpmErase,data);
-	SpmLeapCmd(dst,FlashSpmWritePage,data);
-}
-
-
-
-void BootJacker(void)
-{
-    CheckBootLock();
-    uint8_t spmType=FindSpm();
-	if(spmType==SpmTypeStsSecondary || spmType==SpmTypeStsIdeal)
-		SetupTimer0B(TestTimerWait);	// sts timing.
-	else
-		soft_reset();
-    
-	//sendstring("Found SPM\r\n");
-    uint8_t somedata[PAGESIZE] = {
-								0x00,0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C,0x0D,0x0E,0x0F,0x10,0x11,0x12,0x13,0x14,0x15,0x16,0x17,0x18,0x19,0x1A,0x1B,0x1C,0x1D,0x1E,0x1F,
-								0x20,0x21,0x22,0x23,0x24,0x25,0x26,0x27,0x28,0x29,0x2A,0x2B,0x2C,0x2D,0x2E,0x2F,0x30,0x31,0x32,0x33,0x34,0x35,0x36,0x37,0x38,0x39,0x3A,0x3B,0x3C,0x3D,0x3E,0x3F,
-								0x40,0x41,0x42,0x43,0x44,0x45,0x46,0x47,0x48,0x49,0x4A,0x4B,0x4C,0x4D,0x4E,0x4F,0x50,0x51,0x52,0x53,0x54,0x55,0x56,0x57,0x58,0x59,0x5A,0x5B,0x5C,0x5D,0x5E,0x5F,
-								0x70,0x92,0x57,0x00,0xe8,0x95,0x66,0x67,0x68,0x69,0x6A,0x6B,0x6C,0x6D,0x6E,0x6F,0x70,0x71,0x72,0x73,0x74,0x75,0x76,0x77,0x78,0x79,0x7A,0x7B,0x7C,0x7D,0x7E,0x7F,
-								0x80,0x81,0x82,0x83,0x84,0x85,0x86,0x87,0x88,0x89,0x8A,0x8B,0x8C,0x8D,0x8E,0x8F,0x90,0x91,0x92,0x93,0x94,0x95,0x96,0x97,0x98,0x99,0x9A,0x9B,0x9C,0x9D,0x9E,0x9F,
-								0xA0,0xA1,0xA2,0xA3,0xA4,0xA5,0xA6,0xA7,0xA8,0xA9,0xAA,0xAB,0xAC,0xAD,0xAE,0xAF,0xB0,0xB1,0xB2,0xB3,0xB4,0xB5,0xB6,0xB7,0xB8,0xB9,0xBA,0xBB,0xBC,0xBD,0xBE,0xBF,
-								0xC0,0xC1,0xC2,0xC3,0xC4,0xC5,0xC6,0xC7,0xC8,0xC9,0xCA,0xCB,0xCC,0xCD,0xCE,0xCF,0xD0,0xD1,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8,0xD9,0xDA,0xDB,0xDC,0xDD,0xDE,0xDF,
-								0xE0,0xE1,0xE2,0xE3,0xE4,0xE5,0xE6,0xE7,0xE8,0xE9,0xEA,0xEB,0xEC,0xED,0xEE,0xEF,0xF0,0xF1,0xF2,0xF3,0xF4,0xF5,0xF6,0xF7,0xF8,0xF9,0xFA,0xFB,0xFC,0xFD,0xFE,0xFD
-							};
-	//write spm command to end of boot where it won't get overwritten for use in the rest of the code
-	//sendstring("WSPCSPM1\r\n");
-	uint8_t leapcmd[6] = {0x70,0x92,0x57,0x00,0xe8,0x95};
-	WriteBlock(leapcmd, BOOT_END-6, 6);
-	
-	//SpmSequenceAddr.add_32 = BOOT_END-6;
-    //write some test data
-	//sendstring("WDATA001\r\n");
-    for(uint32_t address = BOOT_START; address <= BOOT_END+PAGESIZE; address += PAGESIZE)
-    {
-        WriteBlock(somedata, address, PAGESIZE-1);
-		FindSpm();    
-    }
-	asm("cli\n");
-}
-
-void main()
-{
-	asm("cli\n");
-	wdt_disable();
-	BootJacker();
-	//asm("break\n");
-	for(;;)
-	{
-		//asm("break\n");
-		_delay_ms(1000);
-		//sendstring("Done");
-	}
 }

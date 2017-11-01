@@ -68,3 +68,5 @@ compile_commands.json
 # miscellaneous
 logs/
 output/
+**/.idea/
+**new_boot.h

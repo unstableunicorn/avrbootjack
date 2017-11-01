@@ -4,10 +4,6 @@
 #define	_B1024	// boot size select: _Bxxxx (words), powers of two only
 #include	<avr/io.h>	
 		
-/* define pin for enter-self-prog-mode */		
-#define	PROGPORT	PORTD
-#define	PROGPIN	PIND
-#define	PROG_NO	PD4
 		
 /* baud rate register value calculation */		
 //#define	CPU_FREQ	7372800
@@ -27,15 +23,13 @@
 		
 /* definitions for SPM control */		
 #define	SPMCR_REG	SPMCSR
-#define	APP_END_STR     "0x1F800\0"	
-#define BOOT_END_STR    "0x1FFFE\0"
+
+/* definitions for bootloader and sections*/
+#define	PAGESIZE	256
+#define	APP_END     0x1F800	
+#define BOOT_END    0x1FFFE
+#define BOOT_START 0x1F8FF 
 #define	LARGE_MEMORY	
-		
-/* definitions for device recognition */		
-#define	PARTCODE	0
-#define	SIGNATURE_BYTE_1	0x1E
-#define	SIGNATURE_BYTE_2	0x97
-#define	SIGNATURE_BYTE_3	0x05
 		
 /* indicate that preprocessor result is included */		
 #define	PPINC	

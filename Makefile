@@ -49,7 +49,7 @@ CPU_FLAG = -mmcu=$(MMCU)
 OPT_FLAGS := -Os -ffunction-sections -fdata-sections -fpack-struct -fshort-enums 
 
 # Warning Flags
-W_FLAGS := -Wall -Wextra -Wno-expansion-to-defined 
+W_FLAGS := -Wall -Wextra -Wno-expansion-to-defined -Wno-main 
 
 # Miscellaneous Flags
 M_FLAGS := -gdwarf-2

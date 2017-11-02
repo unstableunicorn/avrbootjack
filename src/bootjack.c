@@ -119,7 +119,7 @@ uint8_t findSpmInstruction(void)
 {
 	uint16_t sts_instruction_check, spm_csr_mem_check, spm_instruction_check;
 	
-	for(uint32_t i = APP_END; i < BOOT_END; i += 2)
+	for(uint32_t i = APP_END; i < (BOOT_END-4); i += 2)
     {
 		sts_instruction_check = getFlashWord((i));
 		sts_instruction_check &= ~STS_REGISTER_MASK;
@@ -217,7 +217,6 @@ void spmLeap( uint32_t address, uint8_t spm_cmd, uint16_t data)
                 "st Z,%4\n"	// store the command in the reg.
                 "pop r31\n"
                 "pop r30\n"	// restore the spm target address into Z.
-				//"break\n" // break here for testing.
                 "ret\n"			// return to bootloader.
                 "SpmLeapCmdRet:pop %11\n"		// restore command Reg.
                 "mov r30,%3\n"

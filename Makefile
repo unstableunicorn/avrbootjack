@@ -1,8 +1,7 @@
 ################################################################################
-# Makefile for dss camera bootloader
+# Makefile for bootloader updater
 # Author: Elric Hindy
-# Date: 25 Aug 2016
-# Version 1.0
+# Date: Nov 2017
 ################################################################################
 
 SHELL := /bin/bash
@@ -17,7 +16,6 @@ SRC_DIR := src/
 ROOT_DIR := $(shell pwd)
 RM := rm -rf
 F_CPU = 7372800UL
-#MMCU = atmega168
 MMCU = atmega1284p
 
 # programmer settings
